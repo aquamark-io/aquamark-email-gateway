@@ -200,30 +200,30 @@ app.post('/webhook/inbound', async (req, res) => {
       
       logger.info(`Successfully watermarked ${files.length} file(s)`);
       
+      // Send email with watermarked attachments
+      logger.info(`Sending email to: ${funder.destination_email}`);
+      
+      await postmarkClient.sendEmail({
+        From: 'gateway@aquamark.io',
+        ReplyTo: senderEmail,
+        To: funder.destination_email,
+        Subject: `New Submission - ${funder.company_name}`,
+        TextBody: `Submitted by: ${senderName} (${senderEmail})`,
+        Attachments: watermarkedAttachments
+      });
+      
+      logger.info('Email sent successfully');
+      
+      res.json({ 
+        success: true, 
+        message: 'Email processed and forwarded',
+        files_processed: files.length
+      });
+      
     } catch (error) {
-      logger.error(`Error during watermarking process:`, error.message);
-      return res.status(500).json({ error: `Watermarking failed: ${error.message}` });
+      logger.error(`Error during watermarking/sending process:`, error.message);
+      return res.status(500).json({ error: `Processing failed: ${error.message}` });
     }
-    
-    // Send email with watermarked attachments
-    logger.info(`Sending email to: ${funder.destination_email}`);
-    
-    await postmarkClient.sendEmail({
-      From: 'gateway@aquamark.io',
-      ReplyTo: senderEmail,
-      To: funder.destination_email,
-      Subject: `New Submission - ${funder.company_name}`,
-      TextBody: `Submitted by: ${senderName} (${senderEmail})`,
-      Attachments: watermarkedAttachments
-    });
-    
-    logger.info('Email sent successfully');
-    
-    res.json({ 
-      success: true, 
-      message: 'Email processed and forwarded',
-      files_processed: files.length
-    });
     
   } catch (error) {
     logger.error('Error processing webhook:', error);
