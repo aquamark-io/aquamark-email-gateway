@@ -83,13 +83,13 @@ app.post('/webhook/inbound', async (req, res) => {
       return res.status(404).json({ error: 'Funder not found' });
     }
     
-    logger.info(`Found funder: ${funder.company_name}`);
+    logger.info(`Found funder: ${funder.company_name}, user_email: ${funder.user_email}`);
     
-    // Extract broker domain from sender
+    // Extract broker name from sender
     const senderEmail = emailData.From || emailData.FromFull?.Email;
-    const brokerDomain = senderEmail.split('@')[1];
+    const senderName = emailData.FromName || emailData.FromFull?.Name || senderEmail.split('@')[0];
     
-    logger.info(`Broker domain: ${brokerDomain}`);
+    logger.info(`Broker: ${senderName} (${senderEmail})`);
     
     // Check if there are attachments
     const attachments = emailData.Attachments || [];
@@ -103,26 +103,51 @@ app.post('/webhook/inbound', async (req, res) => {
     
     // Process each attachment through the watermarking API
     const watermarkedAttachments = [];
+    const tempFiles = []; // Track temp files for cleanup
     
     for (const attachment of attachments) {
       try {
-        // Get logo from Supabase Storage
-        const { data: logoData } = supabase.storage
-          .from('gateway-logos')
-          .getPublicUrl(funder.logo_storage_path);
+        // Only process PDF files
+        if (!attachment.Name.toLowerCase().endsWith('.pdf')) {
+          logger.warn(`Skipping non-PDF file: ${attachment.Name}`);
+          continue;
+        }
         
-        const logoUrl = logoData.publicUrl;
+        // Upload file to temporary storage
+        const tempFileName = `temp/${Date.now()}-${attachment.Name}`;
+        const fileBuffer = Buffer.from(attachment.Content, 'base64');
         
-        // Prepare watermarking request
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from('funder-logos')
+          .upload(tempFileName, fileBuffer, {
+            contentType: attachment.ContentType,
+            upsert: false
+          });
+        
+        if (uploadError) {
+          throw new Error(`Failed to upload temp file: ${uploadError.message}`);
+        }
+        
+        tempFiles.push(tempFileName);
+        
+        // Get public URL for the temp file
+        const { data: urlData } = supabase.storage
+          .from('funder-logos')
+          .getPublicUrl(tempFileName);
+        
+        const fileUrl = urlData.publicUrl;
+        
+        logger.info(`Uploaded temp file: ${tempFileName}`);
+        
+        // Call Funder API with correct parameters
         const watermarkPayload = {
-          funderId: funderId,
-          logoUrl: logoUrl,
-          brokerDomain: brokerDomain,
-          fileName: attachment.Name,
-          fileContent: attachment.Content // Base64 from Postmark
+          user_email: funder.user_email,
+          file_url: fileUrl,
+          broker_name: senderName
         };
         
-        // Call your Funder API
+        logger.info(`Calling Funder API with payload:`, watermarkPayload);
+        
         const watermarkResponse = await fetch(process.env.FUNDER_API_URL, {
           method: 'POST',
           headers: {
@@ -133,15 +158,21 @@ app.post('/webhook/inbound', async (req, res) => {
         });
         
         if (!watermarkResponse.ok) {
-          throw new Error(`Watermarking failed: ${watermarkResponse.statusText}`);
+          const errorText = await watermarkResponse.text();
+          throw new Error(`Watermarking failed: ${watermarkResponse.status} - ${errorText}`);
         }
         
         const watermarkedFile = await watermarkResponse.json();
         
+        // Download watermarked file from returned URL
+        const watermarkedFileResponse = await fetch(watermarkedFile.file_url);
+        const watermarkedBuffer = await watermarkedFileResponse.arrayBuffer();
+        const watermarkedBase64 = Buffer.from(watermarkedBuffer).toString('base64');
+        
         watermarkedAttachments.push({
           Name: attachment.Name,
-          Content: watermarkedFile.content, // Base64
-          ContentType: attachment.ContentType
+          Content: watermarkedBase64,
+          ContentType: 'application/pdf'
         });
         
         logger.info(`Successfully watermarked: ${attachment.Name}`);
@@ -152,19 +183,32 @@ app.post('/webhook/inbound', async (req, res) => {
       }
     }
     
+    // Clean up temporary files
+    for (const tempFile of tempFiles) {
+      try {
+        await supabase.storage
+          .from('funder-logos')
+          .remove([tempFile]);
+        logger.info(`Cleaned up temp file: ${tempFile}`);
+      } catch (error) {
+        logger.warn(`Failed to clean up temp file ${tempFile}:`, error);
+      }
+    }
+    
     if (watermarkedAttachments.length === 0) {
       logger.error('No attachments were successfully watermarked');
       return res.status(500).json({ error: 'Watermarking failed for all attachments' });
     }
     
-    // Send email with watermarked attachments
+    // Send email with watermarked attachments from verified domain
     logger.info(`Sending email to: ${funder.destination_email}`);
     
     await postmarkClient.sendEmail({
-      From: senderEmail,
+      From: 'gateway@aquamark.io',
+      ReplyTo: senderEmail,
       To: funder.destination_email,
-      Subject: 'New Submission',
-      TextBody: '', // Empty body as requested
+      Subject: `New Submission - ${funder.company_name}`,
+      TextBody: `Submitted by: ${senderName} (${senderEmail})`,
       Attachments: watermarkedAttachments
     });
     
