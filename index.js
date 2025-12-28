@@ -135,9 +135,14 @@ app.post('/webhook/inbound', async (req, res) => {
           .from('funder-logos')
           .getPublicUrl(tempFileName);
         
-        const fileUrl = urlData.publicUrl;
+        let fileUrl = urlData.publicUrl;
         
-        logger.info(`Uploaded temp file: ${tempFileName}`);
+        // Ensure absolute URL
+        if (!fileUrl.startsWith('http')) {
+          fileUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/funder-logos/${tempFileName}`;
+        }
+        
+        logger.info(`File URL for API: ${fileUrl}`);
         
         // Call Funder API with correct parameters
         const watermarkPayload = {
