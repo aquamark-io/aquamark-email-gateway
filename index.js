@@ -83,13 +83,13 @@ app.post('/webhook/inbound', async (req, res) => {
       return res.status(404).json({ error: 'Funder not found' });
     }
     
-    logger.info(`Found funder: ${funder.company_name}, user_email: ${funder.user_email}`);
+    logger.info(`Found funder: ${funder.company_name}`);
     
     // Extract broker name from sender
     const senderEmail = emailData.From || emailData.FromFull?.Email;
-    const senderName = emailData.FromName || emailData.FromFull?.Name || senderEmail.split('@')[0];
+    const senderName = emailData.FromFull?.Name || emailData.FromName || senderEmail;
     
-    logger.info(`Broker: ${senderName} (${senderEmail})`);
+    logger.info(`Sender: ${senderName} (${senderEmail})`);
     
     // Check if there are attachments
     const attachments = emailData.Attachments || [];
@@ -99,113 +99,113 @@ app.post('/webhook/inbound', async (req, res) => {
       return res.status(200).json({ message: 'No attachments to process' });
     }
     
-    logger.info(`Processing ${attachments.length} attachment(s)`);
+    // Filter to PDF attachments only
+    const pdfAttachments = attachments.filter(att => 
+      att.Name.toLowerCase().endsWith('.pdf')
+    );
     
-    // Process each attachment through the watermarking API
-    const watermarkedAttachments = [];
-    const tempFiles = []; // Track temp files for cleanup
+    if (pdfAttachments.length === 0) {
+      logger.warn('No PDF attachments found in email');
+      return res.status(200).json({ message: 'No PDF attachments to process' });
+    }
     
-    for (const attachment of attachments) {
-      try {
-        // Only process PDF files
-        if (!attachment.Name.toLowerCase().endsWith('.pdf')) {
-          logger.warn(`Skipping non-PDF file: ${attachment.Name}`);
-          continue;
-        }
+    logger.info(`Processing ${pdfAttachments.length} PDF attachment(s)`);
+    
+    // Prepare files array for Funder API (new format preserves filenames)
+    const files = pdfAttachments.map(att => ({
+      name: att.Name,
+      data: att.Content // Postmark already provides base64
+    }));
+    
+    try {
+      logger.info(`Sending ${files.length} file(s) to watermarking API`);
+      
+      // Call Funder API with files array
+      const watermarkPayload = {
+        user_email: funder.user_email,
+        broker_name: senderName,
+        files: files
+      };
+      
+      const watermarkResponse = await fetch(process.env.FUNDER_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.FUNDER_API_KEY}`
+        },
+        body: JSON.stringify(watermarkPayload)
+      });
+      
+      if (!watermarkResponse.ok) {
+        const errorText = await watermarkResponse.text();
+        throw new Error(`Watermarking API failed (${watermarkResponse.status}): ${errorText}`);
+      }
+      
+      const result = await watermarkResponse.json();
+      
+      // Check job status and wait for completion
+      const jobId = result.job_id;
+      logger.info(`Job created: ${jobId}, polling for completion...`);
+      
+      // Poll job status (max 30 seconds)
+      let attempts = 0;
+      let jobCompleted = false;
+      let downloadUrl = null;
+      
+      while (attempts < 15 && !jobCompleted) {
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
         
-        // Upload file to temporary storage
-        const tempFileName = `temp/${Date.now()}-${attachment.Name}`;
-        const fileBuffer = Buffer.from(attachment.Content, 'base64');
-        
-        const { data: uploadData, error: uploadError } = await supabase.storage
-          .from('funder-logos')
-          .upload(tempFileName, fileBuffer, {
-            contentType: attachment.ContentType,
-            upsert: false
-          });
-        
-        if (uploadError) {
-          throw new Error(`Failed to upload temp file: ${uploadError.message}`);
-        }
-        
-        tempFiles.push(tempFileName);
-        
-        // Get public URL for the temp file
-        const { data: urlData } = supabase.storage
-          .from('funder-logos')
-          .getPublicUrl(tempFileName);
-        
-        let fileUrl = urlData.publicUrl;
-        
-        // Ensure absolute URL
-        if (!fileUrl.startsWith('http')) {
-          fileUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/funder-logos/${tempFileName}`;
-        }
-        
-        logger.info(`File URL for API: ${fileUrl}`);
-        
-        // Call Funder API with correct parameters
-        const watermarkPayload = {
-          user_email: funder.user_email,
-          file_url: fileUrl,
-          broker_name: senderName
-        };
-        
-        logger.info(`Calling Funder API with payload:`, watermarkPayload);
-        
-        const watermarkResponse = await fetch(process.env.FUNDER_API_URL, {
-          method: 'POST',
+        const statusResponse = await fetch(`${process.env.FUNDER_API_URL.replace('/watermark-funder-broker', '')}/job-status/${jobId}`, {
           headers: {
-            'Content-Type': 'application/json',
             'Authorization': `Bearer ${process.env.FUNDER_API_KEY}`
-          },
-          body: JSON.stringify(watermarkPayload)
+          }
         });
         
-        if (!watermarkResponse.ok) {
-          const errorText = await watermarkResponse.text();
-          throw new Error(`Watermarking failed: ${watermarkResponse.status} - ${errorText}`);
+        if (statusResponse.ok) {
+          const status = await statusResponse.json();
+          logger.info(`Job ${jobId} status: ${status.status}`);
+          
+          if (status.status === 'completed') {
+            jobCompleted = true;
+            downloadUrl = status.download_url;
+          } else if (status.status === 'failed') {
+            throw new Error(`Watermarking job failed: ${status.error_message}`);
+          }
         }
         
-        const watermarkedFile = await watermarkResponse.json();
-        
-        // Download watermarked file from returned URL
-        const watermarkedFileResponse = await fetch(watermarkedFile.file_url);
-        const watermarkedBuffer = await watermarkedFileResponse.arrayBuffer();
-        const watermarkedBase64 = Buffer.from(watermarkedBuffer).toString('base64');
-        
-        watermarkedAttachments.push({
-          Name: attachment.Name,
-          Content: watermarkedBase64,
-          ContentType: 'application/pdf'
-        });
-        
-        logger.info(`Successfully watermarked: ${attachment.Name}`);
-        
-      } catch (error) {
-        logger.error(`Error watermarking ${attachment.Name}:`, error);
-        // Continue processing other attachments
+        attempts++;
       }
-    }
-    
-    // Clean up temporary files
-    for (const tempFile of tempFiles) {
-      try {
-        await supabase.storage
-          .from('funder-logos')
-          .remove([tempFile]);
-        logger.info(`Cleaned up temp file: ${tempFile}`);
-      } catch (error) {
-        logger.warn(`Failed to clean up temp file ${tempFile}:`, error);
+      
+      if (!jobCompleted) {
+        throw new Error('Watermarking job timed out');
       }
+      
+      // Download watermarked ZIP
+      logger.info(`Downloading watermarked file from: ${downloadUrl}`);
+      const downloadResponse = await fetch(downloadUrl);
+      
+      if (!downloadResponse.ok) {
+        throw new Error(`Failed to download watermarked file: ${downloadResponse.statusText}`);
+      }
+      
+      const watermarkedBuffer = await downloadResponse.arrayBuffer();
+      const watermarkedBase64 = Buffer.from(watermarkedBuffer).toString('base64');
+      
+      // Attach the watermarked ZIP
+      const watermarkedAttachments = [{
+        Name: `watermarked-${senderName.replace(/\s+/g, '-')}-${jobId.substring(0, 8)}.zip`,
+        Content: watermarkedBase64,
+        ContentType: 'application/zip'
+      }];
+      
+      logger.info(`Successfully watermarked ${files.length} file(s)`);
+      
+    } catch (error) {
+      logger.error(`Error during watermarking process:`, error.message);
+      return res.status(500).json({ error: `Watermarking failed: ${error.message}` });
     }
     
-    if (watermarkedAttachments.length === 0) {
-      logger.error('No attachments were successfully watermarked');
-      return res.status(500).json({ error: 'Watermarking failed for all attachments' });
-    }
-    
-    // Send email with watermarked attachments from verified domain
+    // Send email with watermarked attachments
     logger.info(`Sending email to: ${funder.destination_email}`);
     
     await postmarkClient.sendEmail({
@@ -222,7 +222,7 @@ app.post('/webhook/inbound', async (req, res) => {
     res.json({ 
       success: true, 
       message: 'Email processed and forwarded',
-      attachments: watermarkedAttachments.length
+      files_processed: files.length
     });
     
   } catch (error) {
