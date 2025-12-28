@@ -152,7 +152,7 @@ app.post('/webhook/inbound', async (req, res) => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-API-Key': process.env.FUNDER_API_KEY
+            'Authorization': `Bearer ${process.env.FUNDER_API_KEY}`
           },
           body: JSON.stringify(watermarkPayload)
         });
