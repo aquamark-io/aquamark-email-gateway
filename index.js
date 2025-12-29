@@ -92,7 +92,10 @@ app.post('/webhook/inbound', async (req, res) => {
     
     // Extract broker domain from sender email (better attribution than sender name)
     const senderEmail = emailData.From || emailData.FromFull?.Email;
-    const brokerDomain = senderEmail.split('@')[1];
+    const fullDomain = senderEmail.split('@')[1];
+    
+    // Remove TLD suffix (aquamark.io -> aquamark, quickcapitalgrp.com -> quickcapitalgrp)
+    const brokerDomain = fullDomain.split('.')[0];
     
     logger.info(`Sender: ${senderEmail}, Broker domain: ${brokerDomain}`);
     
