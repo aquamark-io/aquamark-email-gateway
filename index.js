@@ -217,14 +217,25 @@ app.post('/webhook/inbound', async (req, res) => {
       // Send email with watermarked attachments
       logger.info(`Sending email to: ${funder.destination_email}`);
       
-      await postmarkClient.sendEmail({
+      const emailOptions = {
         From: 'Aquamark <gateway@aquamark.io>',
         ReplyTo: senderEmail,
         To: funder.destination_email,
         Subject: originalSubject,
-        TextBody: originalBody,
         Attachments: watermarkedAttachments
-      });
+      };
+      
+      // Add text or HTML body if it exists
+      if (emailData.HtmlBody) {
+        emailOptions.HtmlBody = emailData.HtmlBody;
+        if (emailData.TextBody) {
+          emailOptions.TextBody = emailData.TextBody;
+        }
+      } else if (emailData.TextBody) {
+        emailOptions.TextBody = emailData.TextBody;
+      }
+      
+      await postmarkClient.sendEmail(emailOptions);
       
       logger.info('Email sent successfully');
       
@@ -235,8 +246,14 @@ app.post('/webhook/inbound', async (req, res) => {
       });
       
     } catch (error) {
-      logger.error(`Error during watermarking/sending process:`, error.message);
-      return res.status(500).json({ error: `Processing failed: ${error.message}` });
+      logger.error(`Error during watermarking/sending process:`, { 
+        message: error.message, 
+        stack: error.stack,
+        error: error
+      });
+      return res.status(500).json({ 
+        error: `Processing failed: ${error.message || 'Unknown error'}` 
+      });
     }
     
   } catch (error) {
