@@ -7,6 +7,7 @@ const winston = require('winston');
 const { createClient } = require('@supabase/supabase-js');
 const postmark = require('postmark');
 const fetch = require('node-fetch');
+const AdmZip = require('adm-zip');
 
 // Initialize logger
 const logger = winston.createLogger({
@@ -84,6 +85,10 @@ app.post('/webhook/inbound', async (req, res) => {
     }
     
     logger.info(`Found funder: ${funder.company_name}`);
+    
+    // Extract original email subject and body
+    const originalSubject = emailData.Subject || 'New Submission';
+    const originalBody = emailData.TextBody || emailData.HtmlBody || '';
     
     // Extract broker name from sender
     const senderEmail = emailData.From || emailData.FromFull?.Email;
@@ -189,26 +194,35 @@ app.post('/webhook/inbound', async (req, res) => {
       }
       
       const watermarkedBuffer = await downloadResponse.arrayBuffer();
-      const watermarkedBase64 = Buffer.from(watermarkedBuffer).toString('base64');
       
-      // Attach the watermarked ZIP
-      const watermarkedAttachments = [{
-        Name: `watermarked-${senderName.replace(/\s+/g, '-')}-${jobId.substring(0, 8)}.zip`,
-        Content: watermarkedBase64,
-        ContentType: 'application/zip'
-      }];
+      // Unzip to extract individual PDFs
+      const zip = new AdmZip(Buffer.from(watermarkedBuffer));
+      const zipEntries = zip.getEntries();
       
-      logger.info(`Successfully watermarked ${files.length} file(s)`);
+      // Extract each PDF as a separate attachment
+      const watermarkedAttachments = zipEntries
+        .filter(entry => !entry.isDirectory && entry.entryName.toLowerCase().endsWith('.pdf'))
+        .map(entry => ({
+          Name: entry.entryName,
+          Content: entry.getData().toString('base64'),
+          ContentType: 'application/pdf'
+        }));
+      
+      if (watermarkedAttachments.length === 0) {
+        throw new Error('No PDF files found in watermarked ZIP');
+      }
+      
+      logger.info(`Extracted ${watermarkedAttachments.length} watermarked PDF(s) from ZIP`);
       
       // Send email with watermarked attachments
       logger.info(`Sending email to: ${funder.destination_email}`);
       
       await postmarkClient.sendEmail({
-        From: 'gateway@aquamark.io',
+        From: 'Aquamark <gateway@aquamark.io>',
         ReplyTo: senderEmail,
         To: funder.destination_email,
-        Subject: `New Submission - ${funder.company_name}`,
-        TextBody: `Submitted by: ${senderName} (${senderEmail})`,
+        Subject: originalSubject,
+        TextBody: originalBody,
         Attachments: watermarkedAttachments
       });
       
