@@ -90,11 +90,11 @@ app.post('/webhook/inbound', async (req, res) => {
     const originalSubject = emailData.Subject || 'New Submission';
     const originalBody = emailData.TextBody || emailData.HtmlBody || '';
     
-    // Extract broker name from sender
+    // Extract broker domain from sender email (better attribution than sender name)
     const senderEmail = emailData.From || emailData.FromFull?.Email;
-    const senderName = emailData.FromFull?.Name || emailData.FromName || senderEmail;
+    const brokerDomain = senderEmail.split('@')[1];
     
-    logger.info(`Sender: ${senderName} (${senderEmail})`);
+    logger.info(`Sender: ${senderEmail}, Broker domain: ${brokerDomain}`);
     
     // Check if there are attachments
     const attachments = emailData.Attachments || [];
@@ -128,7 +128,7 @@ app.post('/webhook/inbound', async (req, res) => {
       // Call Funder API with files array
       const watermarkPayload = {
         user_email: funder.user_email,
-        broker_name: senderName,
+        broker_name: brokerDomain,
         files: files
       };
       
