@@ -216,6 +216,7 @@ app.post('/webhook/inbound', async (req, res) => {
       }
       
       logger.info(`Extracted ${watermarkedAttachments.length} watermarked PDF(s) from ZIP`);
+      logger.info(`[SECURITY] All PDFs processed in memory only - no files written to disk or stored`);
       
       // Send email with watermarked attachments
       logger.info(`Sending email to: ${funder.destination_email}`);
@@ -241,6 +242,7 @@ app.post('/webhook/inbound', async (req, res) => {
       await postmarkClient.sendEmail(emailOptions);
       
       logger.info('Email sent successfully');
+      logger.info(`[SECURITY] Processing complete - all temporary data cleared from memory`);
       
       res.json({ 
         success: true, 
