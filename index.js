@@ -189,7 +189,7 @@ app.post('/webhook/inbound', async (req, res) => {
       }
       
       // Download watermarked ZIP
-      logger.info(`Downloading watermarked file from: ${downloadUrl}`);
+      logger.info(`Downloading watermarked files for processing`);
       const downloadResponse = await fetch(downloadUrl);
       
       if (!downloadResponse.ok) {
